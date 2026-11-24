@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from homeassistant.components.binary_sensor import BinarySensorEntity, BinarySensorDeviceClass
@@ -9,10 +10,29 @@ from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 
 from .const import CONF_RADIO_ID_ALIASES, DOMAIN, MANUFACTURER
 from .monitoring import (
-    RADIO_FIELDS, RADIO_TELEMETRY, charge_state, plugin_problem, radio_inventory,
-    radio_telemetry, reading_age, reading_stale,
+    RADIO_FIELDS, RADIO_TELEMETRY, charge_state, heartbeat_max_age, plugin_problem,
+    radio_inventory, radio_telemetry, reading_age, reading_stale,
+)
+from .medre_status import (
+    MAX_AGE_SECONDS as MEDRE_MAX_AGE_SECONDS,
+    PLUGIN_ID as MEDRE_PLUGIN_ID,
+    fresh as medre_status_fresh,
 )
 from .sensor import PyMCBaseEntity, _external_sensor_identity, _external_sensor_readings, _nested
+
+
+def _poll_cadence(coordinator) -> float | None:
+    """Seconds between coordinator polls; None when the cadence is unknown."""
+    interval = getattr(coordinator, "update_interval", None)
+    seconds = getattr(interval, "total_seconds", None)
+    if callable(seconds):
+        try:
+            value = float(seconds())
+        except (TypeError, ValueError):
+            return None
+        if value > 0:
+            return value
+    return None
 
 
 def _snapshot(coordinator, binary: bool) -> dict:
@@ -50,6 +70,17 @@ def _snapshot(coordinator, binary: bool) -> dict:
             "version": plugin.get("version"), "state": plugin.get("state")}
         for field, value in fields.items():
             values[("plugin", plugin["id"], field)] = value
+        if (not binary and plugin["id"] == MEDRE_PLUGIN_ID
+                and plugin.get("enabled") is True and plugin.get("state") == "RUNNING"):
+            status = _nested(data, "plugin_summary", "medre_status")
+            # A cached heartbeat ages between polls; judge it against the cadence.
+            heartbeat_age = heartbeat_max_age(_poll_cadence(coordinator), MEDRE_MAX_AGE_SECONDS)
+            if isinstance(status, dict) and medre_status_fresh(status, max_age=heartbeat_age):
+                for field in ("phase", "health_scope", "runtime_health", "health_observed_at",
+                              "adapters_started", "startup_routes_registered", "startup_routes_blocked"):
+                    value = status.get(field)
+                    if value is not None:
+                        values[("plugin", MEDRE_PLUGIN_ID, "medre_" + field)] = value
     interval = _nested(data, "stats", "sensors", "poll_interval_seconds")
     for reading in _external_sensor_readings(data):
         if not isinstance(reading, dict) or not reading.get("name"):
@@ -147,12 +178,15 @@ class MonitoringSensor(MonitoringEntity, SensorEntity):
             self._attr_native_unit_of_measurement = "s"
             self._attr_device_class = SensorDeviceClass.DURATION
             self._attr_state_class = SensorStateClass.MEASUREMENT
-        elif key[2] == "last_success":
+        elif key[2] in ("last_success", "medre_health_observed_at"):
             self._attr_device_class = SensorDeviceClass.TIMESTAMP
 
     @property
     def native_value(self):
-        return _snapshot(self.coordinator, False).get(self._key)
+        value = _snapshot(self.coordinator, False).get(self._key)
+        if self._key[2] == "medre_health_observed_at" and value is not None:
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        return value
 
 
 class MonitoringBinarySensor(MonitoringEntity, BinarySensorEntity):

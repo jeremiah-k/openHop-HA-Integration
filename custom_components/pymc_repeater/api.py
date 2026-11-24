@@ -13,6 +13,7 @@ from aiohttp import ClientError, ClientResponse, ClientSession, ClientTimeout
 from yarl import URL
 
 from .const import CLIENT_ID_PREFIX, DEFAULT_PACKET_WINDOW_HOURS
+from .medre_status import PLUGIN_ID as MEDRE_PLUGIN_ID, parse_runtime as parse_medre_runtime
 
 REQUEST_TIMEOUT = 10
 PLUGIN_REQUEST_TIMEOUT = 930  # IPC completion 900 seconds plus HTTP margin
@@ -830,7 +831,7 @@ class PyMCRepeaterApiClient:
             for item in plugins
         ):
             raise PyMCRepeaterApiError("Invalid plugin inventory response")
-        return {
+        summary = {
             "plugins": [
                 {key: item[key] for key in ("id", "name", "version", "enabled", "state", "has_runtime")
                  if key in item and isinstance(item[key], (str, bool))}
@@ -841,6 +842,29 @@ class PyMCRepeaterApiClient:
             "running": sum(item["state"] == "RUNNING" for item in plugins),
             "failed": sum(item["state"] == "FAILED" for item in plugins),
         }
+        medre = [row for row in plugins if row.get("id") == MEDRE_PLUGIN_ID]
+        if len(medre) == 1 and medre[0]["enabled"] and medre[0]["state"] == "RUNNING":
+            pid = medre[0].get("pid")
+            if type(pid) is int and pid > 0:
+                status = await self._async_get_medre_status(pid)
+                if status is not None:
+                    summary["medre_status"] = status
+        return summary
+
+    async def _async_get_medre_status(self, pid: int) -> dict[str, Any] | None:
+        """One bounded read of the optional runtime endpoint, never a companion probe."""
+        try:
+            response = await self._async_request_json(
+                "GET", "/api/plugins/runtime", params={"id": MEDRE_PLUGIN_ID},
+                auth="api_token", max_response_bytes=16_384, timeout_seconds=5,
+            )
+        except PyMCRepeaterAuthenticationError:
+            raise
+        except (PyMCRepeaterError, TimeoutError, ValueError):
+            return None
+        if not isinstance(response, dict) or response.get("success") is False:
+            return None
+        return parse_medre_runtime(response.get("data", response), expected_pid=pid)
 
     async def async_get_neighbor_link_history(
         self,
@@ -1710,6 +1734,17 @@ class PyMCRepeaterApiClient:
         return response
 
     @staticmethod
+    async def _async_read_bounded_text(response: ClientResponse, maximum: int) -> str:
+        """Read at most `maximum` bytes of an error body; never the whole body."""
+        body = bytearray()
+        while len(body) < maximum:
+            chunk = await response.content.read(min(65536, maximum - len(body)))
+            if not chunk:
+                break
+            body.extend(chunk)
+        return body.decode("utf-8", errors="replace")
+
+    @staticmethod
     async def _async_read_bounded_json(response: ClientResponse, maximum: int) -> Any:
         """Bound decoded HTTP bytes before parsing, including error responses."""
         import json
@@ -1776,7 +1811,8 @@ class PyMCRepeaterApiClient:
                                 error_payload = {}
                             return {"success": False, "http_status": response.status,
                                     "outcome": error_payload.get("outcome") if isinstance(error_payload, dict) else None}
-                        detail = await response.text()
+                        detail = (await self._async_read_bounded_text(response, max_response_bytes)
+                                  if max_response_bytes is not None else await response.text())
                         raise PyMCRepeaterApiError(
                             f"HTTP {response.status} from {path}: {detail[:200]}"
                         )

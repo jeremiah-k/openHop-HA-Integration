@@ -54,6 +54,19 @@ def reading_stale(reading: dict, interval: Any, *, now: float | None = None) -> 
     return age > max(60, cadence * 3)
 
 
+def heartbeat_max_age(cadence: Any, source_max_age: float) -> float:
+    """Scale the cached heartbeat ceiling to the coordinator poll cadence.
+
+    A cached heartbeat is not stale merely because the next poll has not
+    happened yet, so three poll intervals are allowed with a 60-second
+    minimum. Without cadence evidence the source heartbeat ceiling applies.
+    """
+    value = finite_number(cadence)
+    if value is None or value <= 0:
+        return source_max_age
+    return max(60.0, value * 3)
+
+
 def reading_usable(reading: dict, interval: Any, *, now: float | None = None) -> bool:
     """Never expose cached measurements as fresh without source evidence."""
     return reading.get("ok") is True and reading_stale(reading, interval, now=now) is False

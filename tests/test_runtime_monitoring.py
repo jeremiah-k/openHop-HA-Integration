@@ -1,7 +1,7 @@
 """Execute checked-in entity code with minimal HA boundaries, not a HA harness."""
 import ast
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -12,6 +12,9 @@ COMPONENT = ROOT / 'custom_components/pymc_repeater'
 
 
 def extracted(filename, namespace):
+    if filename == "monitoring_entities.py":
+        status = runpy.run_path(str(COMPONENT / "medre_status.py"))
+        namespace.update(MEDRE_PLUGIN_ID=status["PLUGIN_ID"], medre_status_fresh=status["fresh"], MEDRE_MAX_AGE_SECONDS=status["MAX_AGE_SECONDS"], datetime=datetime, timezone=timezone)
     tree = ast.parse((COMPONENT / filename).read_text())
     nodes = [n for n in tree.body if not isinstance(n, (ast.Import, ast.ImportFrom))]
     exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0), *nodes], type_ignores=[])), filename, 'exec'), namespace)
@@ -185,6 +188,23 @@ class RuntimeMonitoringTests(unittest.TestCase):
         self.assertEqual(charge.native_value, 'discharging')
         coordinator.data['stats']['sensors']['readings'][0]['timestamp'] = 1
         self.assertIsNone(charge.native_value)
+        stamp = helpers['time']()
+        coordinator.data['plugin_summary'] = {'plugins': [
+            {'id': 'medre.bridge', 'enabled': True, 'state': 'RUNNING', 'version': '0.1.0'}],
+            'medre_status': {'updated_at': stamp, 'phase': 'running',
+                             'health_scope': 'retained', 'runtime_health': 'healthy',
+                             'health_observed_at': stamp - 1}}
+        listeners[0]()
+        phase = next(e for e in entities if e._key[2] == 'medre_phase')
+        observed = next(e for e in entities if e._key[2] == 'medre_health_observed_at')
+        state = next(e for e in entities if e._key == ('plugin', 'medre.bridge', 'state'))
+        self.assertEqual(phase.native_value, 'running')
+        self.assertEqual(observed._attr_device_class, 'timestamp')
+        self.assertEqual(observed.native_value, datetime.fromtimestamp(stamp - 1, tz=timezone.utc))
+        coordinator.data['plugin_summary']['medre_status']['updated_at'] = stamp - 31
+        self.assertFalse(phase.available)
+        self.assertFalse(observed.available)
+        self.assertEqual(state.native_value, 'RUNNING')
         coordinator.data = {}
         self.assertFalse(charge.available)
         self.assertFalse(radios[0].available)

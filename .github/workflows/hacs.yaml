@@ -20,6 +20,7 @@ permissions: {}
 
 jobs:
   validate:
+    if: github.repository == 'openhop-dev/openHop-HA-Integration'
     runs-on: ubuntu-latest
     permissions:
       contents: read

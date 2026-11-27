@@ -10,6 +10,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 import unittest
+import runpy
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENT = ROOT / "custom_components/pymc_repeater"
@@ -22,6 +23,8 @@ def client_namespace():
     module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *classes], type_ignores=[])
     namespace = {"Any": Any, "asyncio": asyncio, "DEFAULT_PACKET_WINDOW_HOURS": 24,
                  "REQUEST_TIMEOUT": 10, "NEIGHBOR_SCOPE_QUERY_TIMEOUT": 50}
+    status = runpy.run_path(str(COMPONENT / "medre_status.py"))
+    namespace.update(MEDRE_PLUGIN_ID=status["PLUGIN_ID"], parse_medre_runtime=status["parse_runtime"])
     exec(compile(ast.fix_missing_locations(module), "api.py", "exec"), namespace)
     return namespace
 

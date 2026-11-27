@@ -455,3 +455,22 @@ python3 -m compileall -q custom_components/pymc_repeater
 Release versions are defined in `custom_components/pymc_repeater/manifest.json` and documented in [`CHANGELOG.md`](CHANGELOG.md).
 
 Contributions and focused bug reports are welcome. Please include the Home Assistant version, integration version, Repeater version, and relevant redacted logs when reporting a problem.
+
+### MEDRE bridge monitoring (optional)
+
+The `medre.bridge` service plugin uses the existing openHop plugin controls.
+When a compatible MEDRE runtime publishes `medre.runtime-status.v1` to its
+plugin `runtime.json`, the integration additionally exposes process phase,
+reported aggregate health and scope, the health observation timestamp (Unix
+seconds), started adapter count and startup-derived route counts. These are
+read-only diagnostics, not transport probes or delivery receipts. An unsupported
+schema, stopped plugin, or unavailable runtime endpoint or mismatched supervised
+PID makes the extra fields unavailable; unrelated plugin controls
+and repeater polling remain intact. A heartbeat is judged against the poll
+cadence, so a cached observation stays available until the coordinator has
+missed several polls, while a heartbeat the MEDRE runtime stopped publishing is
+dropped at the next poll. The integration reads only this exact
+plugin's runtime endpoint, once per normal poll, with a bounded response
+that is requested without following redirects, so the token is only ever
+sent to the configured repeater.
+The startup and retained health labels do not imply a fresh adapter sample.

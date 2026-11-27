@@ -857,6 +857,7 @@ class PyMCRepeaterApiClient:
             response = await self._async_request_json(
                 "GET", "/api/plugins/runtime", params={"id": MEDRE_PLUGIN_ID},
                 auth="api_token", max_response_bytes=16_384, timeout_seconds=5,
+                follow_redirects=False,
             )
         except PyMCRepeaterAuthenticationError:
             raise
@@ -1770,6 +1771,7 @@ class PyMCRepeaterApiClient:
         max_response_bytes: int | None = None,
         plugin_request: bool = False,
         timeout_seconds: float = REQUEST_TIMEOUT,
+        follow_redirects: bool = True,
     ) -> dict[str, Any]:
         headers = {"Accept": "application/json"}
 
@@ -1786,6 +1788,10 @@ class PyMCRepeaterApiClient:
 
         # Override the shared session's shorter default only for slow plugin IPC.
         request_options: dict[str, Any] = {"timeout": ClientTimeout(total=timeout_seconds)} if plugin_request else {}
+        if not follow_redirects:
+            # A redirect could carry the credentials header to another origin,
+            # so these requests stay on the configured repeater address.
+            request_options["allow_redirects"] = False
         try:
             async with asyncio.timeout(timeout_seconds):
                 async with self._session.request(
@@ -1799,6 +1805,12 @@ class PyMCRepeaterApiClient:
                     if response.status in (401, 403):
                         raise PyMCRepeaterAuthenticationError(
                             f"Authentication failed for {path}"
+                        )
+                    if not follow_redirects and 300 <= response.status < 400:
+                        # Name the status and path only; the Location target is
+                        # never echoed back, so no part of it can reach a log.
+                        raise PyMCRepeaterApiError(
+                            f"HTTP {response.status} redirect from {path} was not followed"
                         )
                     if response.status >= 400:
                         if plugin_request:

@@ -470,5 +470,7 @@ and repeater polling remain intact. A heartbeat is judged against the poll
 cadence, so a cached observation stays available until the coordinator has
 missed several polls, while a heartbeat the MEDRE runtime stopped publishing is
 dropped at the next poll. The integration reads only this exact
-plugin's runtime endpoint, once per normal poll, with a bounded response.
+plugin's runtime endpoint, once per normal poll, with a bounded response
+that is requested without following redirects, so the token is only ever
+sent to the configured repeater.
 The startup and retained health labels do not imply a fresh adapter sample.

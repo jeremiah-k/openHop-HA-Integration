@@ -1,6 +1,7 @@
 """Actual status parser and API method with isolated HTTP boundaries."""
 from __future__ import annotations
 
+import json
 import runpy
 import time
 import unittest
@@ -181,3 +182,100 @@ class MedreStatusTests(unittest.IsolatedAsyncioTestCase):
         client._async_request_json = request
         with self.assertRaises(ns["PyMCRepeaterAuthenticationError"]):
             await client.async_get_plugin_summary()
+
+
+def status_payload():
+    return {"success": True, "data": response(time.time())}
+
+
+class BoundedContent:
+    def __init__(self, body):
+        self.body, self.read_bytes = body, 0
+
+    async def read(self, maximum):
+        chunk, self.body = self.body[:maximum], self.body[maximum:]
+        self.read_bytes += len(chunk)
+        return chunk
+
+
+class BoundedResponse:
+    status = 200
+
+    def __init__(self, body=b"", payload=None, headers=None):
+        if payload is not None:
+            body = json.dumps(payload).encode()
+        self.content = BoundedContent(body)
+        self.payload = payload or {}
+        self.headers = headers or {}
+        self.closed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        self.closed = True
+
+    async def json(self, **kwargs):
+        return self.payload
+
+
+def session_client(ns, calls, responses):
+    """A client running the real _async_request_json over a scripted session."""
+    from types import SimpleNamespace
+    ns["URL"] = SimpleNamespace(build=lambda **kw: "http://example.invalid:8000")
+    ns["ClientError"] = type("ClientError", (Exception,), {})
+    ns["ClientTimeout"] = lambda **kw: SimpleNamespace(**kw)
+    client = object.__new__(ns["PyMCRepeaterApiClient"])
+    client.host, client.port, client.api_token = "example.invalid", 8000, "example-token"
+
+    def request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return responses.pop(0)
+
+    client._session = SimpleNamespace(request=request)
+    return client
+
+
+class MedreStatusTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_status_request_is_issued_without_following_redirects(self):
+        ns = client_namespace()
+        calls = []
+        client = session_client(ns, calls, [BoundedResponse(payload=status_payload())])
+        status = await client._async_get_medre_status(123)
+        self.assertEqual(status["runtime_health"], "degraded")
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0][2].get("allow_redirects"), False)
+        self.assertNotIn("SECRET", repr(status))
+
+    async def test_runtime_status_redirect_is_refused_without_following_it(self):
+        ns = client_namespace()
+        calls = []
+        location = {"Location": "http://other.invalid:9000/api/plugins/runtime?id=medre.bridge&secret=1"}
+        redirect = BoundedResponse(payload=status_payload(), headers=location)
+        redirect.status = 302
+        client = session_client(ns, calls, [redirect, redirect])
+        result = await client._async_get_medre_status(123)
+        self.assertIsNone(result)
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0][2].get("allow_redirects"), False)
+        with self.assertRaises(ns["PyMCRepeaterApiError"]) as caught:
+            await client._async_request_json("GET", "/api/plugins/runtime",
+                params={"id": "medre.bridge"}, auth="api_token",
+                max_response_bytes=16384, timeout_seconds=5, follow_redirects=False)
+        message = str(caught.exception)
+        self.assertNotIn("Location", message)
+        self.assertNotIn("other.invalid", message)
+        self.assertNotIn("secret", message)
+
+    async def test_existing_requests_keep_the_default_redirect_behaviour(self):
+        ns = client_namespace()
+        calls = []
+        listing = BoundedResponse(payload={"success": True, "plugins": [
+            {"id": "example", "enabled": True, "state": "RUNNING"}]})
+        client = session_client(ns, calls, [listing])
+        result = await client.async_get_plugin_summary()
+        self.assertEqual(result["running"], 1)
+        self.assertEqual(calls[0][0], "GET")
+        self.assertTrue(calls[0][1].endswith("/api/plugins/"))
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("allow_redirects", calls[0][2])
